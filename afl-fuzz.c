@@ -172,6 +172,8 @@ EXP_ST u64 total_crashes,             /* Total number of crashes          */
            unique_tmouts,             /* Timeouts with unique signatures  */
            unique_hangs,              /* Hangs with unique signatures     */
            total_execs,               /* Total execve() calls             */
+           total_fuzzs,               /* Total fuzz stages has done       */
+           total_covered_blocks,      /* Total blocks covered by inputs   */
            start_time,                /* Unix start time (ms)             */
            last_path_time,            /* Time for most recent path (ms)   */
            last_crash_time,           /* Time for most recent crash (ms)  */
@@ -240,6 +242,9 @@ struct queue_entry {
 
   u32 bitmap_size,                    /* Number of bits set in bitmap     */
       exec_cksum;                     /* Checksum of the execution trace  */
+
+  u32 covered_blocks,                 /* Number of blocks been covered    */
+      fuzz_times;                     /* Number of File has fuzzed        */
 
   u64 exec_us,                        /* Execution time (us)              */
       handicap,                       /* Number of queue cycles behind    */
@@ -357,6 +362,33 @@ struct cfg_edge {
     struct cfg_node *next_node;
 };
 static struct cfg_edge cfg_edges[MAP_SIZE];
+
+#define CFG_BLOCK_LEVEL     3
+
+static void cfg_update_predecessors_nodes(struct cfg_node *s, int l)
+{
+    u32 i;
+    for (i = 0; i < s->p_size; i++) {
+        struct cfg_node *p = s->predecessors[i];
+        p->covered_blocks--;
+        if (l > 0) {
+            cfg_update_predecessors_nodes(p, l - 1);
+        }
+    }
+}
+
+static void update_cfg_nodes(u32 idx) {
+    if (cfg_edges[idx].marked) {
+        if (cfg_edges[idx].cur_node->visited == false) {
+            cfg_edges[idx].cur_node->visited = true;
+            cfg_update_predecessors_nodes(cfg_edges[idx].cur_node, CFG_BLOCK_LEVEL);
+        }
+        if (cfg_edges[idx].next_node->visited == false) {
+            cfg_edges[idx].next_node->visited = true;
+            cfg_update_predecessors_nodes(cfg_edges[idx].next_node, CFG_BLOCK_LEVEL);
+        }
+    }
+}
 
 /* Get unix time in milliseconds */
 
@@ -952,14 +984,28 @@ static inline u8 has_new_bits(u8* virgin_map) {
         if ((cur[0] && vir[0] == 0xff) || (cur[1] && vir[1] == 0xff) ||
             (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff) ||
             (cur[4] && vir[4] == 0xff) || (cur[5] && vir[5] == 0xff) ||
-            (cur[6] && vir[6] == 0xff) || (cur[7] && vir[7] == 0xff)) ret = 2;
-        else ret = 1;
+            (cur[6] && vir[6] == 0xff) || (cur[7] && vir[7] == 0xff)) {
+            int j;
+            ret = 2;
+            for (j = 0; j < 8; j++) {
+                if (cur[i] && vir[j] == 0xff) {
+                    update_cfg_nodes(((MAP_SIZE >> 3) - i - 1) * 8 + j);
+                }
+            }
+        } else ret = 1;
 
 #else
 
         if ((cur[0] && vir[0] == 0xff) || (cur[1] && vir[1] == 0xff) ||
-            (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff)) ret = 2;
-        else ret = 1;
+            (cur[2] && vir[2] == 0xff) || (cur[3] && vir[3] == 0xff)) {
+            int j;
+            ret = 2;
+            for (j = 0; j < 4; j++) {
+                if (cur[i] && vir[j] == 0xff) {
+                    update_cfg_nodes(((MAP_SIZE >> 2) - i - 1) * 4 + j);
+                }
+            }
+        } else ret = 1;
 
 #endif /* ^__x86_64__ */
 
@@ -1039,6 +1085,29 @@ static u32 count_bytes(u8* mem) {
 
   return ret;
 
+}
+
+/* @afl-cfg: count coverd blocks(3 level below) by the current input. */
+static u32 count_covered_blocks(u8* mem)
+{
+    u32 i, j, ret = 0;
+    if (mem == NULL) {
+        return 0;
+    }
+    for (i = 0; i < MAP_SIZE >> 3; i++) {
+        u8 mini_byte = mem[i];
+        j = 0;
+        while(mini_byte != 0) {
+            if (mini_byte & 128) {
+                if (cfg_edges[i * 8 + j].marked)
+                    ret += cfg_edges[i * 8 + j].next_node->covered_blocks;
+            }
+            j++;
+            mini_byte = mini_byte << 1;
+        }
+    }
+
+    return ret;
 }
 
 
@@ -2091,7 +2160,25 @@ static int load_cfg_edges()
     return 0;
 }
 
+static void cfg_cal_covered_block(struct cfg_node *s, int l)
+{
+    u32 i;
+    for (i = 0; i < s->p_size; i++) {
+        struct cfg_node *p = s->predecessors[i];
+        p->covered_blocks++;
+        if (l > 0) {
+            cfg_cal_covered_block(p, l - 1);
+        }
+    }
+}
 
+static void cfg_nodes_init()
+{
+    int i = 0;
+    for(i = 0; i < cfg_nodes_cnt; i++) {
+        cfg_cal_covered_block(&cfg_nodes[i], CFG_BLOCK_LEVEL);
+    }
+}
 
 /* Helper function for maybe_add_auto() */
 
@@ -2972,6 +3059,10 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
   update_bitmap_score(q);
 
+  total_covered_blocks -= q->covered_blocks;
+  q->covered_blocks = count_covered_blocks(q->trace_mini);
+  total_covered_blocks += q->covered_blocks;
+
   /* If this case didn't result in new output from the instrumentation, tell
      parent. This is a non-critical problem, but something to warn the user
      about. */
@@ -3709,6 +3800,7 @@ static void find_timeout(void) {
 static void write_stats_file(double bitmap_cvg, double stability, double eps) {
 
   static double last_bcvg, last_stab, last_eps;
+  struct queue_entry *p_queue;
 
   u8* fn = alloc_printf("%s/fuzzer_stats", out_dir);
   s32 fd;
@@ -3781,6 +3873,11 @@ static void write_stats_file(double bitmap_cvg, double stability, double eps) {
              orig_cmdline);
              /* ignore errors */
 
+  p_queue = queue;
+  while(p_queue) {
+    fprintf(f, "%s    %d\n", p_queue->fname, p_queue->fuzz_times);
+    p_queue = p_queue->next;
+  }
   fclose(f);
 
 }
@@ -5019,6 +5116,7 @@ static u32 calculate_score(struct queue_entry* q) {
   u32 avg_exec_us = total_cal_us / total_cal_cycles;
   u32 avg_bitmap_size = total_bitmap_size / total_bitmap_entries;
   u32 perf_score = 100;
+  u32 avg_covered_blocks = total_covered_blocks / total_bitmap_entries;
 
   /* Adjust score based on execution speed of this path, compared to the
      global average. Multiplier ranges from 0.1x to 3x. Fast inputs are
@@ -5071,6 +5169,14 @@ static u32 calculate_score(struct queue_entry* q) {
     default:        perf_score *= 5;
 
   }
+
+  /* @afl-cfg: consider the blocks covered by the path */
+  if (q->covered_blocks * 0.3 > avg_covered_blocks) perf_score *= 3;
+  else if (q->covered_blocks * 0.5 > avg_covered_blocks) perf_score *= 2;
+  else if (q->covered_blocks * 0.75 > avg_covered_blocks) perf_score *= 1.5;
+  else if (q->covered_blocks * 3 < avg_covered_blocks) perf_score *= 0.25;
+  else if (q->covered_blocks * 2 < avg_covered_blocks) perf_score *= 0.5;
+  else if (q->covered_blocks * 1.5 < avg_covered_blocks) perf_score *= 0.75;
 
   /* Make sure that we don't go over limit. */
 
@@ -5277,7 +5383,7 @@ static u8 fuzz_one(char** argv) {
   u8  *in_buf, *out_buf, *orig_in, *ex_tmp, *eff_map = 0;
   u64 havoc_queued,  orig_hit_cnt, new_hit_cnt;
   u32 splice_cycle = 0, perf_score = 100, orig_perf, prev_cksum, eff_cnt = 1;
-
+  u32 fuzz_times = 0;
   u8  ret_val = 1, doing_det = 0;
 
   u8  a_collect[MAX_AUTO_EXTRA];
@@ -5527,6 +5633,7 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP1]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP1] += stage_max;
+  fuzz_times += stage_max;
 
   /* Two walking bits. */
 
@@ -5554,6 +5661,7 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP2]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP2] += stage_max;
+  fuzz_times += stage_max;
 
   /* Four walking bits. */
 
@@ -5585,6 +5693,7 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP4]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP4] += stage_max;
+  fuzz_times += stage_max;
 
   /* Effector map setup. These macros calculate:
 
@@ -5677,6 +5786,7 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP8] += stage_max;
+  fuzz_times += stage_max;
 
   /* Two walking bytes. */
 
@@ -5714,6 +5824,7 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP16] += stage_max;
+  fuzz_times += stage_max;
 
   if (len < 4) goto skip_bitflip;
 
@@ -5750,6 +5861,7 @@ static u8 fuzz_one(char** argv) {
 
   stage_finds[STAGE_FLIP32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_FLIP32] += stage_max;
+  fuzz_times += stage_max;
 
 skip_bitflip:
 
@@ -5822,6 +5934,7 @@ skip_bitflip:
 
   stage_finds[STAGE_ARITH8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH8] += stage_max;
+  fuzz_times += stage_max;
 
   /* 16-bit arithmetics, both endians. */
 
@@ -5916,6 +6029,7 @@ skip_bitflip:
 
   stage_finds[STAGE_ARITH16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH16] += stage_max;
+  fuzz_times += stage_max;
 
   /* 32-bit arithmetics, both endians. */
 
@@ -6008,6 +6122,7 @@ skip_bitflip:
 
   stage_finds[STAGE_ARITH32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_ARITH32] += stage_max;
+  fuzz_times += stage_max;
 
 skip_arith:
 
@@ -6065,6 +6180,7 @@ skip_arith:
 
   stage_finds[STAGE_INTEREST8]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST8] += stage_max;
+  fuzz_times += stage_max;
 
   /* Setting 16-bit integers, both endians. */
 
@@ -6133,6 +6249,7 @@ skip_arith:
 
   stage_finds[STAGE_INTEREST16]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST16] += stage_max;
+  fuzz_times += stage_max;
 
   if (len < 4) goto skip_interest;
 
@@ -6202,6 +6319,7 @@ skip_arith:
 
   stage_finds[STAGE_INTEREST32]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_INTEREST32] += stage_max;
+  fuzz_times += stage_max;
 
 skip_interest:
 
@@ -6268,6 +6386,7 @@ skip_interest:
 
   stage_finds[STAGE_EXTRAS_UO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UO] += stage_max;
+  fuzz_times += stage_max;
 
   /* Insertion of user-supplied extras. */
 
@@ -6317,6 +6436,7 @@ skip_interest:
 
   stage_finds[STAGE_EXTRAS_UI]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_UI] += stage_max;
+  fuzz_times += stage_max;
 
 skip_user_extras:
 
@@ -6368,6 +6488,7 @@ skip_user_extras:
 
   stage_finds[STAGE_EXTRAS_AO]  += new_hit_cnt - orig_hit_cnt;
   stage_cycles[STAGE_EXTRAS_AO] += stage_max;
+  fuzz_times += stage_max;
 
 skip_extras:
 
@@ -6830,9 +6951,11 @@ havoc_stage:
   if (!splice_cycle) {
     stage_finds[STAGE_HAVOC]  += new_hit_cnt - orig_hit_cnt;
     stage_cycles[STAGE_HAVOC] += stage_max;
+    fuzz_times += stage_max;
   } else {
     stage_finds[STAGE_SPLICE]  += new_hit_cnt - orig_hit_cnt;
     stage_cycles[STAGE_SPLICE] += stage_max;
+    fuzz_times += stage_max;
   }
 
 #ifndef IGNORE_FINDS
@@ -6943,6 +7066,13 @@ abandon_entry:
   }
 
   munmap(orig_in, queue_cur->len);
+
+  /* @afl-cfg */
+  total_fuzzs += fuzz_times;
+  queue_cur->fuzz_times += fuzz_times;
+  total_covered_blocks -= queue_cur->covered_blocks;
+  queue_cur->covered_blocks = count_covered_blocks(queue_cur->trace_mini);
+  total_covered_blocks += queue_cur->covered_blocks;
 
   if (in_buf != orig_in) ck_free(in_buf);
   ck_free(out_buf);
@@ -8312,6 +8442,8 @@ int main(int argc, char** argv) {
   if (load_cfg_edges() == -1) {
     return -1;
   }
+
+  cfg_nodes_init();
 
   start_time = get_cur_time();
 
