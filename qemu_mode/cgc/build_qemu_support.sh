@@ -19,7 +19,7 @@
 # afl-fuzz. 
 #
 # The modifications reside in patches/*. The standalone QEMU binary
-# will be written to ../afl-qemu-trace.
+# will be written to ../../afl-qemu-trace-cgc.
 #
 
 echo "================================================="
@@ -36,16 +36,16 @@ if [ ! "`uname -s`" = "Linux" ]; then
 
 fi
 
-if [ ! -f "patches/afl-qemu-cpu-inl.h" -o ! -f "../config.h" ]; then
+if [ ! -f "patches/afl-qemu-cpu-inl.h" -o ! -f "../../config.h" ]; then
 
   echo "[-] Error: key files not found - wrong working directory?"
   exit 1
 
 fi
 
-if [ ! -f "../afl-showmap" ]; then
+if [ ! -f "../../afl-showmap" ]; then
 
-  echo "[-] Error: ../afl-showmap not found - compile AFL first!"
+  echo "[-] Error: ../../afl-showmap not found - compile AFL first!"
   exit 1
 
 fi
@@ -80,37 +80,6 @@ fi
 
 echo "[+] All checks passed!"
 
-#echo "[+] Successfully created '../afl-qemu-trace'."
-#
-#echo "[*] Testing the build..."
-#
-#cd ..
-#
-#make >/dev/null || exit 1
-#
-#gcc test-instr.c -o test-instr || exit 1
-#
-#unset AFL_INST_RATIO
-#
-#echo 0 | ./afl-showmap -m none -Q -q -o .test-instr0 ./test-instr || exit 1
-#echo 1 | ./afl-showmap -m none -Q -q -o .test-instr1 ./test-instr || exit 1
-#
-#rm -f test-instr
-#
-#cmp -s .test-instr0 .test-instr1
-#DR="$?"
-#
-#rm -f .test-instr0 .test-instr1
-#
-#if [ "$DR" = "0" ]; then
-#
-#  echo "[-] Error: afl-qemu-trace instrumentation doesn't seem to work!"
-#  exit 1
-#
-#fi
-#
-#echo "[+] Instrumentation tests passed. "
-
 echo "[+] Building CGC qemu!"
 
 QEMU_DIR=qemu-cgc-afl
@@ -138,12 +107,12 @@ echo "[+] Build process successful!"
 
 echo "[*] Copying binary..."
 
-cp -f "i386-linux-user/qemu-i386" "../../afl-qemu-trace" || exit 1
+cp -f "i386-linux-user/qemu-i386" "../../../afl-qemu-trace-cgc" || exit 1
 
 cd ..
-ls -l ../afl-qemu-trace || exit 1
+ls -l ../../afl-qemu-trace-cgc || exit 1
 
-echo "[+] Successfully created '../../afl-qemu-trace'."
+echo "[+] Successfully created '../../../afl-qemu-trace-cgc'."
 
 echo "[+] All set, you can now use the -Q mode in afl-fuzz on CGC binaries!"
 
