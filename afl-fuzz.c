@@ -1991,7 +1991,6 @@ EXP_ST void init_forkserver(char** argv) {
   if (!forksrv_pid) {
 
     struct rlimit r;
-
     /* Umpf. On OpenBSD, the default fd limit for root users is set to
        soft 128. Let's try to fix that... */
 
@@ -2089,7 +2088,6 @@ EXP_ST void init_forkserver(char** argv) {
 
     /* Use a distinctive bitmap signature to tell the parent about execv()
        falling through. */
-
     *(u32*)trace_bits = EXEC_FAIL_SIG;
     exit(0);
 
@@ -6891,8 +6889,10 @@ EXP_ST void check_binary(u8* fname) {
 
 #ifndef __APPLE__
 
-  if (f_data[0] != 0x7f || memcmp(f_data + 1, "ELF", 3))
-    FATAL("Program '%s' is not an ELF binary", target_path);
+  if (f_data[0] != 0x7f || memcmp(f_data + 1, "ELF", 3)) {
+      if (f_data[0] != 0x7f || memcmp(f_data + 1, "CGC", 3))
+        FATAL("Program '%s' is not an ELF binary", target_path);
+  }
 
 #else
 
@@ -7607,7 +7607,7 @@ static char** get_qemu_argv(u8* own_loc, char** argv, int argc) {
 
   /* Workaround for a QEMU stability glitch. */
 
-  setenv("QEMU_LOG", "nochain", 1);
+  //setenv("QEMU_LOG", "nochain", 1);
 
   memcpy(new_argv + 3, argv + 1, sizeof(char*) * argc);
 
